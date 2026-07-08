@@ -1,0 +1,16 @@
+[Unit]
+Description=ELA-Server für die Übergabe von AMWeb-Alarmen an die ELA
+After=syslog.target network.target
+
+[Service]
+Type=simple
+User=ela
+Group=ela
+WorkingDirectory=/opt/elaserver
+ExecStart=/opt/elaserver/venv/bin/python elaserver.py
+
+Restart=always
+RestartSec=120
+
+[Install]
+WantedBy=multi-user.target

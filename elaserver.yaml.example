@@ -1,0 +1,23 @@
+server:
+  address: localhost
+  port: 8080
+
+releais:
+  # GPIO-Pins (BCM-Nummerierung auf gpiochip4 des Raspberry Pi 5) für die
+  # Ausgänge "Licht" und "Blitzleuchte". Wert 0 oder Weglassen der Option
+  # deaktiviert den jeweiligen Ausgang.
+  gpio_port_lights_alarm: 18
+  gpio_port_flash_alarm: 23
+
+  # Dauer in Sekunden, die die Ausgänge nach einem Alarm automatisch
+  # eingeschaltet bleiben, bevor sie sich selbst wieder abschalten.
+  # Ein eingehendes "standby"-Signal schaltet beide Ausgänge unabhängig davon
+  # sofort ab.
+  switch_duration: 5
+  flash_duration: 900
+
+logging:
+  # Anzahl Tage, die rotierte Logdateien (amweb-webhook.log.YYYY-MM-DD)
+  # aufbewahrt werden, bevor sie automatisch gelöscht werden. Die Logdatei
+  # wird täglich um Mitternacht rotiert.
+  log_retention_days: 14
