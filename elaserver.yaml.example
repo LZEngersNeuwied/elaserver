@@ -16,6 +16,25 @@ releais:
   switch_duration: 5
   flash_duration: 900
 
+# Zusätzliche Aktion bei Alarmeingang: ein GET-Request an ein externes System.
+# Der Request wird im Hintergrund abgesetzt und blockiert weder den Response an
+# den Alarmmonitor noch das Schalten der Relais-Ausgänge.
+alarm_request:
+  enabled: false
+
+  # Ziel-URL. Der Parameter "keyword" wird automatisch angehängt; eine bereits
+  # in der URL enthaltene Query bleibt erhalten.
+  url: ""
+
+  # Wird als Header "x-api-key" mitgesendet.
+  api_key: ""
+
+  # Fester Wert, der als Query-Parameter "keyword" mitgesendet wird.
+  keyword: ""
+
+  # Timeout in Sekunden für den ausgehenden Request.
+  timeout_seconds: 5
+
 logging:
   # Anzahl Tage, die rotierte Logdateien (amweb-webhook.log.YYYY-MM-DD)
   # aufbewahrt werden, bevor sie automatisch gelöscht werden. Die Logdatei

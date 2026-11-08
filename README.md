@@ -16,6 +16,22 @@ der HTTP-Response wird sofort zurückgegeben, sodass mehrere Anfragen
 (z. B. `alarm` gefolgt von `standby`) unabhängig von laufenden Wartezeiten
 verarbeitet werden.
 
+## Externer Alarm-Request (Keyword)
+
+Bei einem Alarm kann zusätzlich ein GET-Request an ein externes System
+abgesetzt werden (Abschnitt `alarm_request` in `elaserver.yaml`). Der Request
+sendet den Header `x-api-key` mit dem konfigurierten Schlüssel sowie den
+Query-Parameter `keyword` mit dem fest konfigurierten Wert aus
+`alarm_request.keyword`. Aus dem eingehenden Alarm-Request wird nichts
+übernommen; Query-Parameter des Alarmmonitors dürfen vorhanden sein, werden
+aber nicht ausgewertet.
+
+Auch dieser Request läuft in einem eigenen Thread; er verzögert weder den
+Response an den Alarmmonitor noch das Schalten der Ausgänge, und ein Fehler des
+externen Systems wird lediglich protokolliert. Fehlt bei aktiviertem
+`alarm_request` die URL oder das Keyword, wird kein Request gesendet und eine
+Warnung ins Log geschrieben — die Relais-Ausgänge schalten davon unabhängig.
+
 ## Setup (lokal / zum Testen)
 
 ```bash
@@ -44,6 +60,11 @@ Alle Einstellungen liegen in `elaserver.yaml` (Vorlage: `elaserver.yaml.example`
 - `server.address` / `server.port` — Adresse und Port des Webservice (Standard: `localhost` / `8080`)
 - `releais.gpio_port_lights_alarm` / `releais.gpio_port_flash_alarm` — GPIO-Pins (BCM-Nummerierung) der beiden Relais-Ausgänge; `0` bzw. Weglassen deaktiviert den jeweiligen Ausgang
 - `releais.switch_duration` / `releais.flash_duration` — Sekunden, die Licht- bzw. Blitz-Ausgang nach einem Alarm automatisch eingeschaltet bleiben, bevor sie sich selbst abschalten
+- `alarm_request.enabled` — schaltet den externen GET-Request bei Alarm ein bzw. aus (Standard: aus)
+- `alarm_request.url` — Ziel-URL des externen Systems; `keyword` wird automatisch angehängt, eine bereits enthaltene Query bleibt erhalten
+- `alarm_request.api_key` — Wert des Headers `x-api-key`
+- `alarm_request.keyword` — fester Wert, der als Query-Parameter `keyword` mitgesendet wird
+- `alarm_request.timeout_seconds` — Timeout des ausgehenden Requests (Standard: 5)
 - `logging.log_retention_days` — Anzahl Tage, die rotierte Logdateien aufbewahrt werden (Standard: 14, Rotation täglich um Mitternacht)
 
 Ein `standby`-Aufruf schaltet beide Ausgänge unabhängig von den konfigurierten
@@ -51,9 +72,9 @@ Zeiten sofort ab.
 
 Die tatsächliche `elaserver.yaml` ist standortspezifisch (Adresse, Pins,
 Zeiten) und daher bewusst **nicht** Teil des Git-Repositories (siehe
-`.gitignore`). Anders als bei anderen Diensten enthält die Konfiguration
-keine sensiblen Daten, daher ist kein Override per Umgebungsvariable
-vorgesehen.
+`.gitignore`). Sie enthält mit `alarm_request.api_key` inzwischen auch einen
+Zugangsschlüssel und sollte entsprechend nicht weitergegeben werden; auf dem
+Zielsystem gehört sie `ela` und ist nur für diesen Benutzer lesbar zu halten.
 
 ## Produktivbetrieb (systemd)
 
@@ -88,8 +109,12 @@ vorgesehen.
    sudo find /opt/elaserver -type d -exec chmod 755 {} \; && \
    sudo find /opt/elaserver -type f -exec chmod 644 {} \; && \
    sudo chmod 755 /opt/elaserver/venv/bin/python && \
-   sudo chown -R ela:ela /opt/elaserver/venv
+   sudo chown -R ela:ela /opt/elaserver/venv && \
+   sudo chmod 640 /opt/elaserver/elaserver.yaml
    ```
+
+   `elaserver.yaml` enthält mit `alarm_request.api_key` einen Zugangsschlüssel
+   und wird daher auf `640` gesetzt, statt wie die übrigen Dateien auf `644`.
 
 5. `elaserver.service` nach `/etc/systemd/system/` kopieren
 6. Danach:
@@ -105,8 +130,8 @@ gemäß Schritt 3 Mitglied der Gruppe `gpio` ist, übernimmt systemd diese
 zusätzliche Gruppenmitgliedschaft automatisch beim Start.
 
 Logs: `journalctl -u elaserver -f` (Start/Stopp/Fehler) sowie
-`/opt/elaserver/amweb-webhook.log` (Alarm- und Standby-Ereignisse, rotiert
-gemäß `log_retention_days`).
+`/opt/elaserver/amweb-webhook.log` (Alarm- und Standby-Ereignisse sowie
+Ergebnis des externen Keyword-Requests, rotiert gemäß `log_retention_days`).
 
 ### Hinweis zur Netzwerk-Sicherheit
 

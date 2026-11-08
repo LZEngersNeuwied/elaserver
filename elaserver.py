@@ -6,6 +6,9 @@ ELA-Server
 Nimmt Webservice-Aufrufe eines Alarmmonitors entgegen (GET /alarm, GET /standby)
 und schaltet dafür zwei Relais-Ausgänge (Licht und Blitzleuchte) über GPIO
 an einem Raspberry Pi 5.
+
+Zusätzlich kann bei einem Alarm ein GET-Request an ein externes System
+abgesetzt werden (siehe Abschnitt 'alarm_request' in der Konfiguration).
 """
 
 import logging
@@ -13,19 +16,30 @@ import logging.handlers
 import signal
 import sys
 import threading
+import urllib.error
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-
+from urllib.parse import urlencode, urlsplit
+import glob
+import os
 import gpiod
+
 from gpiod.line import Direction, Value
 import yaml
 
 CONFIG_FILE = 'elaserver.yaml'
 LOG_FILE = 'amweb-webhook.log'
 LOG_FORMAT = '%(asctime)s %(levelname)s %(message)s'
-GPIO_CHIP_NAME = '/dev/gpiochip4'
+GPIO_CHIP_NAME = '/dev/gpiochip15'
+GPIO_CHIP_LABEL = "pinctrl-rp1"   # RP1 auf dem Raspberry Pi 5
 MANDATORY_SERVER_OPTIONS = ['address', 'port']
+# Nur erforderlich, wenn 'alarm_request' aktiviert ist.
+MANDATORY_ALARM_REQUEST_OPTIONS = ['url', 'api_key', 'keyword']
 DEFAULT_LOG_RETENTION_DAYS = 14
+
+# Obergrenze für Response-Bodies des externen Systems, die ins Log geschrieben werden.
+MAX_LOGGED_BODY_BYTES = 4096
 
 # GPIO-Pins, die beim Start sicherheitshalber als Ausgang auf "inaktiv"
 # gesetzt werden, auch wenn sie aktuell nicht verwendet werden.
@@ -163,10 +177,75 @@ def get_int_option(section, option, default):
         return default
 
 
+def get_str_option(section, option, default=''):
+    """Liest eine Text-Option aus der Konfiguration, mit Fallback auf
+    'default', falls die Option fehlt oder leer ist."""
+    value = config.get(section, {}).get(option)
+    if value is None:
+        return default
+    value = str(value).strip()
+    return value or default
+
+
 def get_gpio_pin(section, option):
     """Liest eine GPIO-Pin-Nummer aus der Konfiguration. 0 bzw. eine fehlende
     Option bedeutet: Ausgang ist deaktiviert."""
     return get_int_option(section, option, 0)
+
+
+def send_keyword_request(url, keyword):
+    """Setzt den GET-Request an das externe System ab. Läuft in einem eigenen
+    Thread, damit weder der HTTP-Response an den Alarmmonitor noch das
+    Schalten der Relais-Ausgänge auf das externe System warten müssen."""
+    api_key = get_str_option('alarm_request', 'api_key')
+    timeout = get_int_option('alarm_request', 'timeout_seconds', 5)
+
+    separator = '&' if urlsplit(url).query else '?'
+    request_url = f"{url}{separator}{urlencode({'keyword': keyword})}"
+
+    request = urllib.request.Request(
+        request_url, method='GET', headers={'x-api-key': api_key}
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            body = response.read(MAX_LOGGED_BODY_BYTES).decode('utf-8', 'replace').strip()
+            logging.info(
+                "Keyword-Request an %s beantwortet mit HTTP %s: %s",
+                request_url, response.status, body,
+            )
+    except urllib.error.HTTPError as exc:
+        body = exc.read(MAX_LOGGED_BODY_BYTES).decode('utf-8', 'replace').strip()
+        logging.error(
+            "Keyword-Request an %s mit HTTP %s fehlgeschlagen: %s",
+            request_url, exc.code, body,
+        )
+    except Exception:
+        logging.exception("Keyword-Request an %s fehlgeschlagen", request_url)
+
+
+def trigger_keyword_request():
+    """Stößt den externen GET-Request bei einem Alarm an. Das Keyword ist fest
+    in 'alarm_request.keyword' konfiguriert."""
+    if not config.get('alarm_request', {}).get('enabled', False):
+        return
+
+    url = get_str_option('alarm_request', 'url')
+    if not url:
+        logging.warning(
+            "alarm_request ist aktiviert, aber alarm_request.url fehlt - kein Keyword-Request gesendet"
+        )
+        return
+
+    keyword = get_str_option('alarm_request', 'keyword')
+    if not keyword:
+        logging.warning(
+            "alarm_request ist aktiviert, aber alarm_request.keyword fehlt - kein Keyword-Request gesendet"
+        )
+        return
+
+    threading.Thread(
+        target=send_keyword_request, args=(url, keyword), name='keyword-request', daemon=True
+    ).start()
 
 
 class S(BaseHTTPRequestHandler):
@@ -188,6 +267,7 @@ class S(BaseHTTPRequestHandler):
             self.do_response("ok")
             lights_output.switch_on_for(switch_duration)
             flash_output.switch_on_for(flash_duration)
+            trigger_keyword_request()
         elif action == "standby":
             logging.info("Alarmmeldung beendet - schalte Ausgänge sofort ab")
             self.do_response("ok")
@@ -211,7 +291,9 @@ class S(BaseHTTPRequestHandler):
         self.wfile.write(response.encode('utf-8'))
 
     def do_GET(self):
-        self.do_ela(str(self.path).strip('/'))
+        # Query-Parameter des Alarmmonitors werden nicht ausgewertet, dürfen
+        # aber vorhanden sein - maßgeblich ist allein der Pfad.
+        self.do_ela(urlsplit(self.path).path.strip('/'))
 
     def do_POST(self):
         self.do_unknownMethod("POST")
@@ -274,6 +356,29 @@ def validate_config():
             logging.error("Fehlender Konfigurationsparameter %s in 'server'", option)
             sys.exit(1)
 
+    # Der externe Alarm-Request ist optional; fehlt etwas, wird nur gewarnt,
+    # damit das Schalten der Ausgänge davon unberührt bleibt.
+    if config.get('alarm_request', {}).get('enabled', False):
+        for option in MANDATORY_ALARM_REQUEST_OPTIONS:
+            if not get_str_option('alarm_request', option):
+                logging.warning(
+                    "alarm_request ist aktiviert, aber alarm_request.%s fehlt", option
+                )
+
+def find_gpio_chip(label: str = GPIO_CHIP_LABEL, fallback: str | None = None) -> str:
+    """Sucht den GPIO-Chip anhand seines Labels, unabhängig von der Nummerierung."""
+    for path in sorted(glob.glob("/dev/gpiochip*")):
+        if not gpiod.is_gpiochip_device(path):
+            continue
+        try:
+            with gpiod.Chip(path) as chip:
+                if chip.get_info().label == label:
+                    return path
+        except OSError:
+            continue
+    if fallback and os.path.exists(fallback):
+        return fallback
+    raise FileNotFoundError(f"Kein GPIO-Chip mit Label '{label}' gefunden")
 
 def run(server_class=ThreadingHTTPServer, handler_class=S):
     global lights_output, flash_output, gpio_chip
@@ -283,7 +388,9 @@ def run(server_class=ThreadingHTTPServer, handler_class=S):
     logging.info("Initialisiere Webserver")
     validate_config()
 
-    gpio_chip = gpiod.Chip(GPIO_CHIP_NAME)
+    chip_path = find_gpio_chip(fallback=GPIO_CHIP_NAME)
+    logging.info("GPIO-Chip: %s", chip_path)
+    gpio_chip = gpiod.Chip(chip_path)
 
     lights_pin = get_gpio_pin('releais', 'gpio_port_lights_alarm')
     flash_pin = get_gpio_pin('releais', 'gpio_port_flash_alarm')
